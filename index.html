@@ -1,0 +1,123 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Campus Slot Lab</title>
+<style>
+:root{font-family:"DM Sans",system-ui,sans-serif;color:#173237;background:#f5f5ef}*{box-sizing:border-box}body{margin:0}main{max-width:1100px;margin:auto;padding:34px clamp(16px,4vw,56px)}header{border-bottom:1px solid #abbdb8;padding-bottom:24px;margin-bottom:24px}h1{font-family:Georgia,serif;font-size:clamp(42px,7vw,78px);font-weight:normal;letter-spacing:-.055em;line-height:1;margin:18px 0}header p{font-size:1.1rem;max-width:56ch}h2{font-size:1.2rem;margin:0 0 15px}p{line-height:1.5}form,.results{background:white;border:1px solid #c4cfca;border-radius:12px;padding:22px;margin-bottom:18px}fieldset{border:0;margin:0;padding:0;display:grid;grid-template-columns:repeat(auto-fit,minmax(150px,1fr));gap:16px}label{font-size:.86rem;font-weight:650}input{width:100%;margin-top:6px;border:1px solid #94aaa5;border-radius:5px;padding:9px;font:inherit;color:inherit}button{cursor:pointer;font:inherit;font-weight:650;border:1px solid #1b514d;border-radius:5px;color:white;background:#1b514d;padding:9px 15px}form button{margin-top:18px}#export{color:#1b514d;background:white}button:focus-visible,input:focus-visible,summary:focus-visible{outline:3px solid #bf7924;outline-offset:2px}.scroll{overflow:auto}table{width:100%;border-collapse:collapse;font-variant-numeric:tabular-nums}th,td{text-align:right;padding:11px 8px;border-bottom:1px solid #e2e6df;white-space:nowrap}th:first-child,td:first-child{text-align:left}th{font-size:.8rem;color:#4b5e5b}.pick{background:#e8f2e9;font-weight:600}#decision{border-left:4px solid #2a7260;padding:8px 14px;background:#f1f5ed}details{margin:18px 0;line-height:1.55}summary{cursor:pointer;font-weight:bold}small{color:#48635c}footer{margin:22px 0;font-size:.85rem;color:#48635c}
+</style></head><body><main>
+<header><h1>Campus Slot Lab</h1><p>How many appointments should a campus service desk hold for walk-ins? Compare booking policies before changing the timetable.</p></header>
+<form id="scenario"><h2>Model a four-hour shift</h2><fieldset>
+<label>Advance requests per day<input name="requests" type="number" min="0" max="40" value="16" required></label>
+<label>Average walk-ins per day<input name="walkins" type="number" min="0" max="40" value="8" required></label>
+<label>Booking no-shows (%)<input name="noShow" type="number" min="0" max="100" value="15" required></label>
+<label>Minimum advance access (%)<input name="floor" type="number" min="0" max="100" value="70" required></label>
+<label>Minimum walk-ins served (%)<input name="walkFloor" type="number" min="0" max="100" value="45" required></label>
+<label>Simulation seed<input name="seed" type="number" min="1" max="999999" value="42" required></label>
+</fieldset><button>Compare policies</button></form>
+<section class="results" aria-labelledby="rtitle"><h2 id="rtitle">Policy comparison</h2><small id="scenarioText"></small><p id="decision" role="status"></p><div class="scroll"><table><thead><tr><th scope="col">Walk-in slots held</th><th scope="col">Visits / day</th><th scope="col">Advance access</th><th scope="col">Walk-ins served</th><th scope="col">Walk-in p90 wait</th><th scope="col">Idle slots / day</th></tr></thead><tbody id="rows"></tbody></table></div>
+<details><summary>How to interpret the comparison</summary><p>One operator has sixteen 15-minute slots. Advance requests take the earliest open slots, skipping evenly spaced walk-in holds. An unbooked slot or no-show can serve the oldest waiting walk-in. Walk-ins arrive at slot boundaries with Poisson demand and leave after at most 30 minutes of waiting or at closing. Each policy sees identical arrivals and attendance draws.</p><p>Advance access counts accepted bookings divided by all advance requests, including people who later miss their visit. Walk-in service counts completed walk-in visits divided by walk-in arrivals. The 90th-percentile wait covers served walk-ins only. A dash means there were no eligible observations. The suggested policy maximizes visits subject to both access floors. Ties favor fewer holds.</p></details>
+<button type="button" id="export">Download comparison CSV</button></section>
+<footer>Synthetic demand · 200 simulated shifts per policy · Runs entirely on this device</footer></main>
+<script id="model">
+const DAYS = 200;
+const SLOTS = 16;
+const POLICIES = [0, 2, 4, 6, 8];
+
+function randomSource(seed) {
+  let state = seed >>> 0;
+  return () => {
+    state = (Math.imul(1664525, state) + 1013904223) >>> 0;
+    return (state + 0.5) / 4294967296;
+  };
+}
+
+function poisson(mean, random) {
+  const limit = Math.exp(-mean);
+  let product = 1, count = 0;
+  do { product *= random(); count++; } while (product > limit);
+  return count - 1;
+}
+
+function makeDay(settings, random) {
+  return {
+    arrivals: Array.from({length:SLOTS}, () => poisson(settings.walkins / SLOTS, random)),
+    attendance: Array.from({length:settings.requests}, () => random() >= settings.noShow / 100)
+  };
+}
+
+function runDay(day, held) {
+  const holds = new Set(Array.from({length:held}, (_, i) => Math.floor((i + 0.5) * SLOTS / held)));
+  let bookings = 0, attended = 0, arrivals = 0;
+  let queue = [];
+  const waits = [];
+  for (let slot = 0; slot < SLOTS; slot++) {
+    queue = queue.filter(arrival => slot - arrival <= 2);
+    arrivals += day.arrivals[slot];
+    for (let i = 0; i < day.arrivals[slot]; i++) queue.push(slot);
+    if (!holds.has(slot) && bookings < day.attendance.length) {
+      const showed = day.attendance[bookings++];
+      if (showed) { attended++; continue; }
+    }
+    if (queue.length) waits.push((slot - queue.shift()) * 15);
+  }
+  return {bookings, attended, arrivals, waits};
+}
+
+function compare(settings) {
+  const random = randomSource(settings.seed);
+  const days = Array.from({length:DAYS}, () => makeDay(settings, random));
+  return POLICIES.map(held => {
+    let bookings = 0, attended = 0, arrivals = 0;
+    const waits = [];
+    for (const day of days) {
+      const result = runDay(day, held);
+      bookings += result.bookings;
+      attended += result.attended;
+      arrivals += result.arrivals;
+      waits.push(...result.waits);
+    }
+    waits.sort((a, b) => a - b);
+    const visits = (attended + waits.length) / DAYS;
+    return {held, visits, advance:settings.requests ? bookings / (DAYS * settings.requests) : null,
+      walkin:arrivals ? waits.length / arrivals : null,
+      p90:waits.length ? waits[Math.ceil(waits.length * 0.9) - 1] : null, idle:SLOTS - visits};
+  });
+}
+
+function selectPolicy(rows, floor, walkFloor) {
+  const eligible = rows.filter(row => (row.advance === null || 100 * row.advance >= floor) && (row.walkin === null || 100 * row.walkin >= walkFloor));
+  return eligible.sort((a, b) => b.visits - a.visits || a.held - b.held)[0];
+}
+</script><script>
+const form = document.querySelector('#scenario');
+let settings, comparison;
+const percent = value => value === null ? '—' : (100 * value).toFixed(1) + '%';
+function render() {
+  settings = Object.fromEntries([...new FormData(form)].map(([key,value]) => [key, Number(value)]));
+  comparison = compare(settings);
+  const choice = selectPolicy(comparison, settings.floor, settings.walkFloor);
+  document.querySelector('#scenarioText').textContent = '200 shifts · ' + settings.requests + ' advance requests/day · ' + settings.walkins + ' expected walk-ins/day · ' + settings.noShow + '% no-shows · seed ' + settings.seed;
+  document.querySelector('#decision').textContent = choice
+    ? 'Test ' + choice.held + ' held slots. This option serves ' + choice.visits.toFixed(2) + ' visits per shift in this simulation.' + (settings.requests ? ' Advance access is ' + percent(choice.advance) + '.' : ' No advance requests were modeled.') + (choice.walkin === null ? ' No walk-ins arrived.' : ' Walk-in service is ' + percent(choice.walkin) + '.')
+    : 'No tested policy meets both access targets. Review capacity or the targets before piloting a change.';
+  const body = document.querySelector('#rows');
+  body.replaceChildren();
+  for (const row of comparison) {
+    const tr = body.insertRow();
+    if (row === choice) tr.className = 'pick';
+    for (const value of [row.held + ' of 16',row.visits.toFixed(2),percent(row.advance),percent(row.walkin),row.p90 === null ? '—' : row.p90 + ' min',row.idle.toFixed(2)]) {
+      tr.insertCell().textContent = value;
+    }
+  }
+}
+form.addEventListener('submit', event => {event.preventDefault(); render();});
+document.querySelector('#export').addEventListener('click', () => {
+  const headers = ['days','seed','requests_per_day','expected_walkins','no_show_pct','advance_floor_pct','walkin_floor_pct','held_slots','visits_per_day','advance_fraction','walkin_fraction','p90_served_wait_min','idle_slots_per_day'];
+  const rows = comparison.map(r => [DAYS,settings.seed,settings.requests,settings.walkins,settings.noShow,settings.floor,settings.walkFloor,r.held,r.visits,r.advance,r.walkin,r.p90,r.idle]);
+  const url = URL.createObjectURL(new Blob([[headers,...rows].map(row=>row.join(',')).join('\r\n')],{type:'text/csv'}));
+  const link = document.createElement('a'); link.href = url; link.download = 'campus-slot-comparison.csv'; link.click();
+  setTimeout(() => URL.revokeObjectURL(url),1000);
+});
+render();
+</script></body></html>
